@@ -1,4 +1,4 @@
-package com.example.card_usage_tracker
+package com.pomu.creditcardmanager
 
 import io.flutter.embedding.android.FlutterActivity
 
