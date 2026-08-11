@@ -8,24 +8,53 @@ class ClosingDateUtils {
     return DateTime(year, month, day);
   }
 
-  /// [today]時点で「今アプリが追いかけるべきサイクルの締め日」を返す。
-  /// 今日が今月の締め日以前ならまだ今月の締め日を、
-  /// 締め日を過ぎていれば来月の締め日を対象とする。
-  static DateTime currentTargetClosingDate(DateTime today, int closingDay) {
-    final thisMonthClosing =
-        closingDateFor(today.year, today.month, closingDay);
-    final todayDateOnly = DateTime(today.year, today.month, today.day);
+  /// [closing] の次のサイクルの締め日を返す。
+  /// 締め日が月末にクランプされていても、元の [closingDay] を基準に計算する
+  /// （例: 2/28 の次は、closingDay=31 なら 3/31）。
+  static DateTime nextClosingDateAfter(DateTime closing, int closingDay) {
+    final nextMonth = DateTime(closing.year, closing.month + 1, 1);
+    return closingDateFor(nextMonth.year, nextMonth.month, closingDay);
+  }
 
-    if (!todayDateOnly.isAfter(thisMonthClosing)) {
-      return thisMonthClosing;
-    }
+  /// [now] 時点で「今アプリが追いかけるべきサイクルの締め日」を返す。
+  ///
+  /// サイクルは締め日当日ではなく、**締め日翌日の [rolloverHour]:[rolloverMinute]**
+  /// に次サイクルへ切り替わる。これはアラートの発火時刻と揃えるためで、
+  /// 締め日翌日の朝（アラート発火前）にアプリを開いても、
+  /// まだ前サイクルの未対応が残っている状態を維持できる。
+  static DateTime currentTargetClosingDate(
+    DateTime now,
+    int closingDay, {
+    int rolloverHour = 0,
+    int rolloverMinute = 0,
+  }) {
+    DateTime rolloverOf(DateTime closing) => DateTime(
+          closing.year,
+          closing.month,
+          closing.day + 1,
+          rolloverHour,
+          rolloverMinute,
+        );
 
-    final nextMonthFirstDay = DateTime(today.year, today.month + 1, 1);
-    return closingDateFor(
-      nextMonthFirstDay.year,
-      nextMonthFirstDay.month,
+    // 前月・当月・翌月の3つが候補になる。
+    // 前月が候補に入るのは、締め日翌日のロールオーバー時刻前にいる場合。
+    final previousMonth = DateTime(now.year, now.month - 1, 1);
+    final previousClosing = closingDateFor(
+      previousMonth.year,
+      previousMonth.month,
       closingDay,
     );
+    if (now.isBefore(rolloverOf(previousClosing))) {
+      return previousClosing;
+    }
+
+    final thisClosing = closingDateFor(now.year, now.month, closingDay);
+    if (now.isBefore(rolloverOf(thisClosing))) {
+      return thisClosing;
+    }
+
+    final nextMonth = DateTime(now.year, now.month + 1, 1);
+    return closingDateFor(nextMonth.year, nextMonth.month, closingDay);
   }
 
   /// [today] から [target]（締め日）までの残り日数。

@@ -3,20 +3,20 @@ import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
 import '../models/card_item.dart';
+import 'alert_schedule.dart';
 
 /// 端末内ローカル通知のスケジュール管理を行うサービス。
 /// サーバーは使わず、flutter_local_notifications のみで完結する。
-class NotificationService {
+///
+/// 通知は「次の1回」ではなく [AlertSchedule.cycleCount] サイクル先まで
+/// まとめて予約する。アプリを起動しない限り予約を作り直せないため、
+/// 1回分しか入れていないと、アプリを開かない月以降の通知が途切れてしまう。
+class NotificationService implements AlertScheduler {
   NotificationService._internal();
   static final NotificationService instance = NotificationService._internal();
 
   final FlutterLocalNotificationsPlugin _plugin =
       FlutterLocalNotificationsPlugin();
-
-  /// 通知を送る時刻（毎回この時刻を狙って送信）。
-  /// 変更したい場合はここを書き換えてください。
-  static const int alertHour = 9;
-  static const int alertMinute = 0;
 
   static const String _channelId = 'card_alerts';
   static const String _channelName = 'カード利用アラート';
@@ -54,62 +54,98 @@ class NotificationService {
   }
 
   /// 通知権限をリクエストする（Android 13+ / iOS）。
-  Future<void> requestPermissions() async {
-    await _plugin
+  ///
+  /// 戻り値は許可されたかどうか。判定できないプラットフォーム
+  /// （権限の概念が無い環境など）では null を返す。
+  Future<bool?> requestPermissions() async {
+    final android = await _plugin
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.requestNotificationsPermission();
-    await _plugin
+    final ios = await _plugin
         .resolvePlatformSpecificImplementation<
             IOSFlutterLocalNotificationsPlugin>()
         ?.requestPermissions(alert: true, badge: true, sound: true);
+
+    if (android == null && ios == null) return null;
+    return (android ?? true) && (ios ?? true);
   }
 
-  /// カードIDから決定的な通知IDを生成する（同じカードは常に同じID）。
-  int _notificationIdFor(String cardId) => cardId.hashCode & 0x7fffffff;
+  /// カード＋枝番から通知IDを決める。
+  ///
+  /// ブロック番号は端末に保存された値なので、`String.hashCode` のように
+  /// 実行ごとの安定性が保証されない値に依存しない
+  /// （＝あとから確実にキャンセルできる）。
+  int _notificationId(int block, int slot) =>
+      block * AlertSchedule.slotsPerCard + slot;
 
-  /// 指定した日時に、指定カードの未利用アラートをスケジュールする。
-  /// 既に同じカード用の通知が存在する場合は上書きされる。
-  Future<void> scheduleAlert({
-    required CardItem card,
-    required DateTime alertDateTime,
-  }) async {
-    final id = _notificationIdFor(card.id);
-    final scheduled = tz.TZDateTime(
-      tz.local,
-      alertDateTime.year,
-      alertDateTime.month,
-      alertDateTime.day,
-      alertHour,
-      alertMinute,
-    );
+  @override
+  Future<void> syncAlerts(CardItem card) async {
+    final block = card.notificationBlock;
+    if (block == null) return;
 
-    // 過去日時になる場合は何もしない（次回のサイクル同期時に正しい日時で再設定される）
-    if (!scheduled.isAfter(tz.TZDateTime.now(tz.local))) {
-      return;
-    }
+    final now = tz.TZDateTime.now(tz.local);
+    final wanted = <int, AlertSlot>{
+      for (final slot in AlertSchedule.build(card, DateTime.now()))
+        slot.slot: slot,
+    };
 
-    await _plugin.zonedSchedule(
-      id,
-      '\$付け忘れ注意：${card.name}',
-      '締め日が過ぎました。今月まだ利用登録（\$付け）されていません。',
-      scheduled,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.high,
-          priority: Priority.high,
+    // 予約すべき枝番は上書き、それ以外は取り消す。
+    // 枝番は締め日の「月」で決まるので、同じ月の予約は毎回同じIDになり、
+    // 予約し直しても既存の予約が消えたり二重になったりしない。
+    for (var slot = 0; slot < AlertSchedule.slotsPerCard; slot++) {
+      final target = wanted[slot];
+      final id = _notificationId(block, slot);
+      if (target == null) {
+        await _plugin.cancel(id);
+        continue;
+      }
+
+      final scheduled = tz.TZDateTime(
+        tz.local,
+        target.alertAt.year,
+        target.alertAt.month,
+        target.alertAt.day,
+        target.alertAt.hour,
+        target.alertAt.minute,
+      );
+      if (!scheduled.isAfter(now)) {
+        await _plugin.cancel(id);
+        continue;
+      }
+
+      await _plugin.zonedSchedule(
+        id,
+        '\$付け忘れ注意：${card.name}',
+        '締め日（${target.closingDate.month}/${target.closingDate.day}）が過ぎました。'
+            'このサイクルはまだ利用登録（\$付け）されていません。',
+        scheduled,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _channelId,
+            _channelName,
+            channelDescription: _channelDescription,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+          iOS: DarwinNotificationDetails(),
         ),
-        iOS: DarwinNotificationDetails(),
-      ),
-      androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-    );
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+    }
   }
 
-  /// 指定カードの予定済みアラートをキャンセルする（$付け済みにした時など）。
-  Future<void> cancelAlert(String cardId) async {
-    await _plugin.cancel(_notificationIdFor(cardId));
+  @override
+  Future<void> cancelAlerts(CardItem card) async {
+    final block = card.notificationBlock;
+    if (block == null) return;
+    for (var slot = 0; slot < AlertSchedule.slotsPerCard; slot++) {
+      await _plugin.cancel(_notificationId(block, slot));
+    }
+  }
+
+  @override
+  Future<void> cancelLegacyAlert(String cardId) async {
+    await _plugin.cancel(cardId.hashCode & 0x7fffffff);
   }
 }

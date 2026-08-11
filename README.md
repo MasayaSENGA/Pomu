@@ -24,7 +24,8 @@ flutter run
 
 ## 実装上の前提・注意点
 
-- **通知時刻**：締め日翌日の 9:00 に固定。変更は `lib/services/notification_service.dart` の `alertHour` / `alertMinute`。
+- **通知時刻**：締め日翌日の 9:00 に固定。変更は `lib/services/alert_schedule.dart` の `AlertSchedule.hour` / `minute`。サイクルの切り替わり時刻もこの値に連動します。
+- **通知の予約方式**：アプリを起動している間しか予約を作り直せないため、1カードにつき **12サイクル（約1年）先までまとめて予約**します。予約は起動時に1日1回だけ作り直され、締め日の「月」ごとに固定の通知IDを使うので、何度作り直しても二重登録になりません。カードが多い場合は端末側のアラーム上限（Android では概ね500件）にご注意ください。
 - **タイムゾーン**：`Asia/Tokyo` 固定。海外でも使う場合は `flutter_timezone` 等の導入を検討してください。
 - **通知の精度**：バッテリー消費を抑えるため `inexactAllowWhileIdle`（多少前後する）を使用。分単位で厳密に届ける場合は Android の `SCHEDULE_EXACT_ALARM` 権限と許可導線が別途必要です。
 - **データのバックアップ**：端末内保存のみのため機種変更時は引き継がれません。
@@ -41,6 +42,7 @@ flutter run
 | `lib/screens/card_edit_screen.dart` | 追加・編集フォーム（券面ライブプレビュー付き） |
 | `lib/widgets/card_list_tile.dart` | カード券面風タイル |
 | `lib/services/card_repository.dart` | 保存・締めサイクル管理・通知連携 |
+| `lib/services/alert_schedule.dart` | 「いつ・いくつ通知を予約するか」の純粋ロジック |
 | `lib/services/notification_service.dart` | ローカル通知のスケジュール管理 |
 | `lib/utils/closing_date_utils.dart` | 締め日・残り日数の計算ロジック |
 | `lib/models/card_item.dart` | カードのデータモデル |

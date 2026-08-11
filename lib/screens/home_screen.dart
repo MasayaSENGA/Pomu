@@ -18,6 +18,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<CardItem> _cards = [];
   bool _loading = true;
+  Object? _error;
+
+  /// 通知権限の状態。null は「判定できない（権限の概念が無い環境）」。
+  bool? _notificationsAllowed;
 
   @override
   void initState() {
@@ -42,24 +46,58 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _bootstrap() async {
-    await NotificationService.instance.requestPermissions();
+    await _requestPermissions();
     await _refresh();
   }
 
-  Future<void> _refresh() async {
-    final cards = await CardRepository.instance.syncAllCycles();
-    // 未対応かつ締め日が近いものを上に。済みは下にまとめる。
-    cards.sort((a, b) {
-      if (a.isUsedThisCycle != b.isUsedThisCycle) {
-        return a.isUsedThisCycle ? 1 : -1;
-      }
-      return _remainingDays(a).compareTo(_remainingDays(b));
-    });
+  Future<void> _requestPermissions() async {
+    bool? granted;
+    try {
+      granted = await NotificationService.instance.requestPermissions();
+    } catch (_) {
+      // 判定できない場合は警告を出さない（誤った警告のほうが害が大きい）。
+      granted = null;
+    }
     if (!mounted) return;
-    setState(() {
-      _cards = cards;
-      _loading = false;
-    });
+    setState(() => _notificationsAllowed = granted);
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final cards = await CardRepository.instance.syncAllCycles();
+      // 未対応かつ締め日が近いものを上に。済みは下にまとめる。
+      cards.sort((a, b) {
+        if (a.isUsedThisCycle != b.isUsedThisCycle) {
+          return a.isUsedThisCycle ? 1 : -1;
+        }
+        return _remainingDays(a).compareTo(_remainingDays(b));
+      });
+      if (!mounted) return;
+      setState(() {
+        _cards = cards;
+        _loading = false;
+        _error = null;
+      });
+      _notifyIfDataWasDropped();
+    } catch (error) {
+      // 失敗してもローディングのまま固まらせない。
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = error;
+      });
+    }
+  }
+
+  void _notifyIfDataWasDropped() {
+    final repository = CardRepository.instance;
+    if (!repository.dataWasDropped) return;
+    repository.acknowledgeDroppedData();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('読み込めない保存データがあったため、一部のカードを復元できませんでした。'),
+      ),
+    );
   }
 
   int _remainingDays(CardItem card) {
@@ -123,10 +161,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             _AppBar(scheme: scheme),
+            if (_notificationsAllowed == false)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: _PermissionBanner(onRetry: _requestPermissions),
+                ),
+              ),
             if (_loading)
               const SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_error != null)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: _ErrorState(onRetry: _refresh),
               )
             else if (_cards.isEmpty)
               SliverFillRemaining(
@@ -389,6 +439,108 @@ class _StaggeredIn extends StatelessWidget {
         ),
       ),
       child: child,
+    );
+  }
+}
+
+/// 通知が許可されていないことを知らせるバナー。
+/// 許可されないままだとアプリの目的（$付け忘れの通知）が果たせないため、
+/// 一覧の先頭に出し続ける。
+class _PermissionBanner extends StatelessWidget {
+  const _PermissionBanner({required this.onRetry});
+
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer,
+        borderRadius: AppRadius.cardRadius,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.notifications_off_outlined,
+              size: 20, color: scheme.onErrorContainer),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '通知が許可されていません',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: scheme.onErrorContainer,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'このままだと \$付け忘れのお知らせが届きません。'
+                  '端末の「設定 > 通知 > Pomu」から許可してください。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onErrorContainer.withValues(alpha: 0.85),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () => onRetry(),
+            style: TextButton.styleFrom(foregroundColor: scheme.onErrorContainer),
+            child: const Text('再確認'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 読み込みに失敗したときの表示。ここが無いとローディングのまま固まってしまう。
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({required this.onRetry});
+
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(32, 0, 32, 80),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off_rounded, size: 44, color: scheme.outline),
+            const SizedBox(height: 16),
+            Text(
+              'カードを読み込めませんでした',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: scheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '時間をおいてもう一度お試しください。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: () => onRetry(),
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('再読み込み'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
