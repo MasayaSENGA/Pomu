@@ -46,3 +46,7 @@ flutter run
 | `lib/services/notification_service.dart` | ローカル通知のスケジュール管理 |
 | `lib/utils/closing_date_utils.dart` | 締め日・残り日数の計算ロジック |
 | `lib/models/card_item.dart` | カードのデータモデル |
+
+## ライセンス
+
+MIT License です。詳しくは [`LICENSE`](LICENSE) を参照してください。
